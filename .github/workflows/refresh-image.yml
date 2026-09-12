@@ -117,6 +117,7 @@ jobs:
           docker run --detach \
             --name cloakbrowser-macos-ci-initial \
             --publish 127.0.0.1:9222:9222 \
+            --env CLOAKBROWSER_LICENSE_KEY="${{ secrets.CLOAKBROWSER_LICENSE_KEY }}" \
             --volume cloakbrowser-macos-ci-profile:/root/.cloakbrowser \
             --volume "${GITHUB_WORKSPACE}/tests:/tests:ro" \
             --volume "${RUNNER_TEMP}/cloakbrowser-results:/test-results" \
@@ -143,6 +144,11 @@ jobs:
             test "$(fc-match --format="%{family}" "Menlo")" = Menlo
             test "$(fc-match --format="%{family}" "Monaco")" = Monaco
             test "$(fc-match --format="%{family}" "Helvetica Neue")" = "Helvetica Neue"
+            test "$(fc-match --format="%{family}" ".SF Compact")" = ".SF Compact"
+            [[ "$(fc-match --format="%{family}" "System Font")" == System\ Font,* ]]
+            test "$(fc-match --format="%{family}" ".SF NS Mono")" = ".SF NS Mono"
+            test "$(fc-match --format="%{family}" ".SF NS Rounded")" = ".SF NS Rounded"
+            test "$(fc-match --format="%{family}" ".New York")" = ".New York"
           '
           docker exec cloakbrowser-macos-ci-initial python /tests/runtime_smoke.py \
             --phase initialize \
@@ -196,6 +202,7 @@ jobs:
           docker run --detach \
             --name cloakbrowser-macos-ci-recreated \
             --publish 127.0.0.1:9222:9222 \
+            --env CLOAKBROWSER_LICENSE_KEY="${{ secrets.CLOAKBROWSER_LICENSE_KEY }}" \
             --volume cloakbrowser-macos-ci-profile:/root/.cloakbrowser \
             --volume "${GITHUB_WORKSPACE}/tests:/tests:ro" \
             --volume "${RUNNER_TEMP}/cloakbrowser-results:/test-results" \

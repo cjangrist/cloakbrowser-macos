@@ -63,11 +63,7 @@ MACOS_FONT_FAMILIES = (
     "Geneva",
     "Lucida Grande",
     "Palatino",
-    ".SF Compact",
-    "System Font",
-    ".SF NS Mono",
-    ".SF NS Rounded",
-    ".New York",
+    "BlinkMacSystemFont",
 )
 
 
@@ -144,8 +140,7 @@ async () => {
     'Helvetica', 'Helvetica Neue', 'Impact', 'Menlo', 'Microsoft Sans Serif',
     'Monaco', 'Tahoma', 'Times New Roman', 'Trebuchet MS', 'Webdings',
     'Wingdings', 'Avenir', 'Avenir Next', 'Avenir Next Condensed', 'Geneva',
-    'Lucida Grande', 'Palatino', '.SF Compact', 'System Font', '.SF NS Mono',
-    '.SF NS Rounded', '.New York'
+    'Lucida Grande', 'Palatino', 'BlinkMacSystemFont'
   ];
   const fontCanvas = document.createElement('canvas');
   const fontContext = fontCanvas.getContext('2d');
