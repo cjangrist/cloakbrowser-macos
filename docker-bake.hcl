@@ -40,8 +40,14 @@ target "release" {
 }
 
 target "test" {
-  inherits = ["release"]
+  context = "."
+  dockerfile = "Dockerfile"
+  contexts = {
+    upstream-source = "target:upstream"
+  }
+  args = {
+    UPSTREAM_SHA = "${UPSTREAM_SHA}"
+  }
   platforms = ["linux/amd64"]
   tags = ["cloakbrowser-macos:test"]
-  attest = []
 }

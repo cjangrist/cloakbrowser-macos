@@ -88,7 +88,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build local release candidate from upstream source
-        run: docker buildx bake test --load
+        run: docker buildx bake test --load --provenance=false
 
       - name: Start headed CDP browser
         run: |
