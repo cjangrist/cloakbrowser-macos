@@ -117,7 +117,6 @@ jobs:
           docker run --detach \
             --name cloakbrowser-macos-ci-initial \
             --publish 127.0.0.1:9222:9222 \
-            --env CLOAKBROWSER_LICENSE_KEY="${{ secrets.CLOAKBROWSER_LICENSE_KEY }}" \
             --volume cloakbrowser-macos-ci-profile:/root/.cloakbrowser \
             --volume "${GITHUB_WORKSPACE}/tests:/tests:ro" \
             --volume "${RUNNER_TEMP}/cloakbrowser-results:/test-results" \
@@ -202,7 +201,6 @@ jobs:
           docker run --detach \
             --name cloakbrowser-macos-ci-recreated \
             --publish 127.0.0.1:9222:9222 \
-            --env CLOAKBROWSER_LICENSE_KEY="${{ secrets.CLOAKBROWSER_LICENSE_KEY }}" \
             --volume cloakbrowser-macos-ci-profile:/root/.cloakbrowser \
             --volume "${GITHUB_WORKSPACE}/tests:/tests:ro" \
             --volume "${RUNNER_TEMP}/cloakbrowser-results:/test-results" \
