@@ -63,7 +63,6 @@ MACOS_FONT_FAMILIES = (
     "Geneva",
     "Lucida Grande",
     "Palatino",
-    "BlinkMacSystemFont",
 )
 
 
@@ -73,6 +72,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--phase", choices=("initialize", "verify"), required=True)
+    parser.add_argument("--require-blink-system-font", action="store_true")
     return parser.parse_args()
 
 
@@ -235,13 +235,17 @@ def capture_signals(cdp_url: str, marker: str, initialize: bool) -> dict[str, An
     return signals
 
 
-def validate_profile(signals: dict[str, Any]) -> None:
+def validate_profile(signals: dict[str, Any], require_blink_system_font: bool) -> None:
     missing_fonts = [
         family
         for family in MACOS_FONT_FAMILIES
         if family != "Apple Color Emoji"
         if not signals["font_metrics"].get(family, {}).get("differs_from_fallback", False)
     ]
+    if require_blink_system_font and not signals["font_metrics"].get(
+        "BlinkMacSystemFont", {}
+    ).get("differs_from_fallback", False):
+        missing_fonts.append("BlinkMacSystemFont")
     assertions = {
         "macOS user agent": "Macintosh" in signals["user_agent"],
         "Chrome brand": "Chrome/" in signals["user_agent"],
@@ -288,7 +292,7 @@ def main() -> int:
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
     arguments.output.write_text(json.dumps(signals, indent=2, sort_keys=True) + "\n")
     LOGGER.info("Wrote sanitized results to %s", arguments.output)
-    validate_profile(signals)
+    validate_profile(signals, arguments.require_blink_system_font)
     if arguments.phase == "verify":
         if baseline is None:
             raise ValueError("--baseline is required for verify phase")
