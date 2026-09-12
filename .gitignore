@@ -2,3 +2,4 @@ upstream/
 test-results/
 tmp/
 trash/
+__pycache__/
