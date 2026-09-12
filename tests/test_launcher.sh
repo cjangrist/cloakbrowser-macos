@@ -8,6 +8,7 @@ main() {
 
   launcher_output="$(
     CLOAKSERVE_BINARY=/bin/echo \
+    CLOAKBROWSER_MACOS_FONT_FETCHER=/bin/true \
     CLOAKSERVE_PORT=9333 \
     CLOAKSERVE_HEADLESS=true \
     CLOAKSERVE_DATA_DIR='/tmp/profile with spaces' \
@@ -35,7 +36,7 @@ main() {
   [[ "${launcher_output}" != *"--fingerprint-allow-3p-cookies"* ]]
   [[ "${launcher_output}" != *"--start-maximized"* ]]
 
-  if CLOAKSERVE_HEADLESS=maybe CLOAKSERVE_BINARY=/usr/bin/true bin/default-cloakserve; then
+  if CLOAKSERVE_HEADLESS=maybe CLOAKBROWSER_MACOS_FONT_FETCHER=/bin/true CLOAKSERVE_BINARY=/usr/bin/true bin/default-cloakserve; then
     printf 'Invalid boolean unexpectedly succeeded\n' >&2
     return 1
   fi

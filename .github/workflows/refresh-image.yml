@@ -1,6 +1,16 @@
 name: Refresh CloakBrowser image
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/refresh-image.yml
+      - Dockerfile
+      - docker-bake.hcl
+      - bin/**
+      - config/**
+      - patches/**
+      - tests/**
   schedule:
     - cron: "17 * * * *"
   workflow_dispatch:
@@ -34,7 +44,10 @@ jobs:
             exit 1
           fi
           printf 'sha=%s\n' "${upstream_sha}" >> "${GITHUB_OUTPUT}"
-          if docker buildx imagetools inspect "${IMAGE_NAME}:upstream-${upstream_sha}" >/dev/null 2>&1; then
+          if [[ "${GITHUB_EVENT_NAME}" == push ]]; then
+            printf 'changed=true\n' >> "${GITHUB_OUTPUT}"
+            printf 'Image recipe changed; rebuilding upstream %s.\n' "${upstream_sha}"
+          elif docker buildx imagetools inspect "${IMAGE_NAME}:upstream-${upstream_sha}" >/dev/null 2>&1; then
             printf 'changed=false\n' >> "${GITHUB_OUTPUT}"
             printf 'Upstream %s is already published; no build is needed.\n' "${upstream_sha}"
           else
@@ -75,7 +88,13 @@ jobs:
           python3 -m pytest upstream/tests/test_cloakserve.py -q
 
       - name: Test environment launcher
-        run: bash tests/test_launcher.sh
+        run: |
+          set -Eeuo pipefail
+          bash tests/test_launcher.sh
+          if CLOAKBROWSER_FETCH_MACOS_FONTS=maybe bin/fetch-macos-fonts; then
+            printf 'Invalid font-fetch boolean unexpectedly succeeded\n' >&2
+            exit 1
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
@@ -114,6 +133,17 @@ jobs:
       - name: Validate fingerprint, CDP, Widevine, and initial profile state
         run: |
           set -Eeuo pipefail
+          docker exec cloakbrowser-macos-ci-initial \
+            python -m cloakbrowser info --quick --json >"${RUNNER_TEMP}/cloakbrowser-info.json"
+          jq --exit-status '.fonts.macos == [20, 20]' "${RUNNER_TEMP}/cloakbrowser-info.json"
+          docker exec cloakbrowser-macos-ci-initial bash -ec '
+            test "$(find /root/.cloakbrowser/fonts/macos -maxdepth 1 -type f | wc -l)" -eq 58
+            cd /root/.cloakbrowser/fonts/macos
+            sha256sum --check /usr/local/share/cloakbrowser-macos/macos-fonts.sha256
+            test "$(fc-match --format="%{family}" "Menlo")" = Menlo
+            test "$(fc-match --format="%{family}" "Monaco")" = Monaco
+            test "$(fc-match --format="%{family}" "Helvetica Neue")" = "Helvetica Neue"
+          '
           docker exec cloakbrowser-macos-ci-initial python /tests/runtime_smoke.py \
             --phase initialize \
             --output /test-results/initial.json
@@ -127,6 +157,18 @@ jobs:
             test -f /root/.cloakbrowser/WidevineCdm/manifest.json
             test -f /root/.cloakbrowser/profiles/macos/18929/WidevineCdm/latest-component-updated-widevine-cdm
           '
+
+      - name: Verify cached fonts require no network
+        run: |
+          set -Eeuo pipefail
+          docker run --rm \
+            --entrypoint bash \
+            --network none \
+            --volume cloakbrowser-macos-ci-profile:/root/.cloakbrowser \
+            cloakbrowser-macos:test \
+            -ec 'fetch-macos-fonts >/dev/null && python -m cloakbrowser info --quick --json' \
+            >"${RUNNER_TEMP}/cloakbrowser-cached-info.json"
+          jq --exit-status '.fonts.macos == [20, 20]' "${RUNNER_TEMP}/cloakbrowser-cached-info.json"
 
       - name: Measure initial runtime resources
         run: |

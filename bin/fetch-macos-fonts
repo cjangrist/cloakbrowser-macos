@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Fetch and verify a pinned macOS font set into the persistent runtime cache.
+
+set -Eeuo pipefail
+
+readonly FONT_SOURCE_REVISION="c32f0f47c595f77365319aa30e61ada8521f2adc"
+readonly FONT_SOURCE_BASE="https://media.githubusercontent.com/media/sheying2013/OpenBrowser/${FONT_SOURCE_REVISION}/Browserapp/kernels/windows-x64/wayfern_fonts/macos"
+readonly FONT_MANIFEST="${CLOAKBROWSER_MACOS_FONT_MANIFEST:-/usr/local/share/cloakbrowser-macos/macos-fonts.sha256}"
+
+normalize_boolean() {
+  local normalized_value
+  normalized_value="${1,,}"
+  case "${normalized_value}" in
+    1|true|yes|on) printf '%s' true ;;
+    0|false|no|off) printf '%s' false ;;
+    *) printf 'Invalid boolean value: %s\n' "$1" >&2; return 2 ;;
+  esac
+}
+
+verify_font_cache() {
+  local font_cache_directory="$1"
+  [[ -d "${font_cache_directory}" ]] || return 1
+  (
+    cd "${font_cache_directory}"
+    sha256sum --check --status "${FONT_MANIFEST}"
+  )
+}
+
+download_font() {
+  local font_cache_directory="$1"
+  local expected_hash="$2"
+  local filename="$3"
+  local encoded_filename="${filename// /%20}"
+  local temporary_path="${font_cache_directory}/.${filename}.download.$$"
+  local downloaded_hash
+
+  printf '[cloakbrowser] Fetching macOS font %s\n' "${filename}"
+  curl --fail --location --silent --show-error --retry 5 --retry-all-errors \
+    --connect-timeout 15 --max-time 300 \
+    --output "${temporary_path}" "${FONT_SOURCE_BASE}/${encoded_filename}"
+  downloaded_hash="$(sha256sum "${temporary_path}")"
+  downloaded_hash="${downloaded_hash%% *}"
+  if [[ "${downloaded_hash}" != "${expected_hash}" ]]; then
+    printf 'Checksum mismatch for %s: expected %s, received %s\n' \
+      "${filename}" "${expected_hash}" "${downloaded_hash}" >&2
+    return 1
+  fi
+  mv --force "${temporary_path}" "${font_cache_directory}/${filename}"
+}
+
+populate_font_cache() {
+  local font_cache_directory="$1"
+  local expected_hash
+  local filename
+  local installed_hash
+
+  mkdir -p "${font_cache_directory}"
+  while read -r expected_hash filename; do
+    [[ -n "${expected_hash}" && -n "${filename}" ]] || continue
+    installed_hash=""
+    if [[ -f "${font_cache_directory}/${filename}" ]]; then
+      installed_hash="$(sha256sum "${font_cache_directory}/${filename}")"
+      installed_hash="${installed_hash%% *}"
+    fi
+    if [[ "${installed_hash}" != "${expected_hash}" ]]; then
+      download_font "${font_cache_directory}" "${expected_hash}" "${filename}"
+    fi
+  done < "${FONT_MANIFEST}"
+}
+
+main() {
+  local fetch_enabled
+  local font_cache_directory
+
+  fetch_enabled="$(normalize_boolean "${CLOAKBROWSER_FETCH_MACOS_FONTS:-1}")"
+  [[ "${fetch_enabled}" == true ]] || return 0
+  font_cache_directory="${CLOAKBROWSER_MACOS_FONT_CACHE_DIR:-/root/.cloakbrowser/fonts/macos}"
+
+  if verify_font_cache "${font_cache_directory}"; then
+    printf '[cloakbrowser] Verified cached macOS font set\n'
+  else
+    populate_font_cache "${font_cache_directory}"
+    verify_font_cache "${font_cache_directory}" || {
+      printf 'macOS font cache is incomplete after download\n' >&2
+      return 1
+    }
+    printf '[cloakbrowser] Installed and verified macOS font set\n'
+  fi
+  fc-cache --force "${font_cache_directory}"
+}
+
+main "$@"

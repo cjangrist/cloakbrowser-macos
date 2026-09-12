@@ -9,8 +9,13 @@ LABEL org.opencontainers.image.source="https://github.com/cjangrist/cloakbrowser
       net.angrist.cloakbrowser.upstream.revision="${UPSTREAM_SHA}"
 
 COPY --chmod=0755 bin/default-cloakserve /usr/local/bin/default-cloakserve
+COPY --chmod=0755 bin/fetch-macos-fonts /usr/local/bin/fetch-macos-fonts
+COPY config/macos-fonts.sha256 /usr/local/share/cloakbrowser-macos/macos-fonts.sha256
+COPY config/99-cloakbrowser-macos-fonts.conf /etc/fonts/conf.d/99-cloakbrowser-macos-fonts.conf
 
 ENV CLOAKBROWSER_FETCH_WIDEVINE=1 \
+    CLOAKBROWSER_FETCH_MACOS_FONTS=1 \
+    CLOAKBROWSER_MACOS_FONT_CACHE_DIR=/root/.cloakbrowser/fonts/macos \
     CLOAKBROWSER_DISPLAY_WIDTH=1440 \
     CLOAKBROWSER_DISPLAY_HEIGHT=900 \
     CLOAKSERVE_PORT=9222 \

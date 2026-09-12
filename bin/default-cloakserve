@@ -15,12 +15,15 @@ normalize_boolean() {
 
 main() {
   local cloakserve_binary
+  local font_fetcher
   local headless_enabled
   local preserve_profiles_enabled
   local allow_third_party_cookies
   local start_maximized
   local -a cloakserve_arguments
 
+  font_fetcher="${CLOAKBROWSER_MACOS_FONT_FETCHER:-/usr/local/bin/fetch-macos-fonts}"
+  "${font_fetcher}"
   cloakserve_binary="${CLOAKSERVE_BINARY:-/usr/local/bin/cloakserve}"
   headless_enabled="$(normalize_boolean "${CLOAKSERVE_HEADLESS:-false}")"
   preserve_profiles_enabled="$(normalize_boolean "${CLOAKSERVE_PRESERVE_PROFILES:-true}")"

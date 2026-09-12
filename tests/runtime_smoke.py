@@ -34,6 +34,40 @@ STABLE_SIGNAL_KEYS = (
     "webgl_renderer",
     "canvas_hash",
     "audio_hash",
+    "font_metrics",
+)
+MACOS_FONT_FAMILIES = (
+    "Apple Color Emoji",
+    "Arial",
+    "Arial Narrow",
+    "Arial Unicode MS",
+    "Comic Sans MS",
+    "Courier",
+    "Courier New",
+    "Georgia",
+    "Gill Sans",
+    "Helvetica",
+    "Helvetica Neue",
+    "Impact",
+    "Menlo",
+    "Microsoft Sans Serif",
+    "Monaco",
+    "Tahoma",
+    "Times New Roman",
+    "Trebuchet MS",
+    "Webdings",
+    "Wingdings",
+    "Avenir",
+    "Avenir Next",
+    "Avenir Next Condensed",
+    "Geneva",
+    "Lucida Grande",
+    "Palatino",
+    ".SF Compact",
+    "System Font",
+    ".SF NS Mono",
+    ".SF NS Rounded",
+    ".New York",
 )
 
 
@@ -104,6 +138,39 @@ async () => {
       ])
     : null;
   const storage = await navigator.storage.estimate();
+  const fontFamilies = [
+    'Apple Color Emoji', 'Arial', 'Arial Narrow', 'Arial Unicode MS',
+    'Comic Sans MS', 'Courier', 'Courier New', 'Georgia', 'Gill Sans',
+    'Helvetica', 'Helvetica Neue', 'Impact', 'Menlo', 'Microsoft Sans Serif',
+    'Monaco', 'Tahoma', 'Times New Roman', 'Trebuchet MS', 'Webdings',
+    'Wingdings', 'Avenir', 'Avenir Next', 'Avenir Next Condensed', 'Geneva',
+    'Lucida Grande', 'Palatino', '.SF Compact', 'System Font', '.SF NS Mono',
+    '.SF NS Rounded', '.New York'
+  ];
+  const fontCanvas = document.createElement('canvas');
+  const fontContext = fontCanvas.getContext('2d');
+  const fontText = 'CloakBrowser WMWM iii 0123456789 🌎🚀';
+  const measureFont = family => {
+    const genericFamilies = ['serif', 'sans-serif', 'monospace'];
+    const metricKeys = ['width', 'actualBoundingBoxAscent', 'actualBoundingBoxDescent'];
+    const measurements = genericFamilies.map(genericFamily => {
+      fontContext.font = `32px "__CloakMissingFont__", ${genericFamily}`;
+      const fallback = fontContext.measureText(fontText);
+      fontContext.font = `32px "${family}", "__CloakMissingFont__", ${genericFamily}`;
+      const measured = fontContext.measureText(fontText);
+      return {
+        genericFamily,
+        fallback: Object.fromEntries(metricKeys.map(key => [key, fallback[key]])),
+        measured: Object.fromEntries(metricKeys.map(key => [key, measured[key]])),
+        differs: metricKeys.some(key => Math.abs(measured[key] - fallback[key]) > 0.01)
+      };
+    });
+    return {
+      measurements,
+      differs_from_fallback: measurements.some(measurement => measurement.differs)
+    };
+  };
+  const fontMetrics = Object.fromEntries(fontFamilies.map(family => [family, measureFont(family)]));
   const hexadecimal = value => Array.from(new Uint8Array(value))
     .map(byte => byte.toString(16).padStart(2, '0')).join('');
 
@@ -131,6 +198,7 @@ async () => {
     webgl_renderer: extension ? gl.getParameter(extension.UNMASKED_RENDERER_WEBGL) : null,
     canvas_hash: hexadecimal(canvasDigest),
     audio_hash: hexadecimal(audioDigest),
+    font_metrics: fontMetrics,
     storage_quota: storage.quota,
     widevine_supported: widevineSupported,
     widevine_error: widevineError
@@ -173,6 +241,12 @@ def capture_signals(cdp_url: str, marker: str, initialize: bool) -> dict[str, An
 
 
 def validate_profile(signals: dict[str, Any]) -> None:
+    missing_fonts = [
+        family
+        for family in MACOS_FONT_FAMILIES
+        if family != "Apple Color Emoji"
+        if not signals["font_metrics"].get(family, {}).get("differs_from_fallback", False)
+    ]
     assertions = {
         "macOS user agent": "Macintosh" in signals["user_agent"],
         "Chrome brand": "Chrome/" in signals["user_agent"],
@@ -189,12 +263,14 @@ def validate_profile(signals: dict[str, Any]) -> None:
         "plugins": len(signals["plugins"]) >= 3,
         "storage quota": abs(signals["storage_quota"] - EXPECTED_QUOTA_BYTES) < 16 * 1024 * 1024,
         "Widevine EME": signals["widevine_supported"] is True,
+        "macOS font metrics": not missing_fonts,
     }
     failures = [name for name, passed in assertions.items() if not passed]
     for name, passed in assertions.items():
         LOGGER.info("%s%s%s: %s", COLOR_GREEN if passed else "\033[31m", name, COLOR_RESET, passed)
     if failures:
-        raise AssertionError(f"runtime checks failed: {', '.join(failures)}")
+        details = f"; missing font metrics: {', '.join(missing_fonts)}" if missing_fonts else ""
+        raise AssertionError(f"runtime checks failed: {', '.join(failures)}{details}")
 
 
 def validate_persistence(signals: dict[str, Any], baseline: dict[str, Any]) -> None:
