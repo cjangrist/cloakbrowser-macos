@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Launch CloakServe with environment-controlled persistent macOS profile defaults.
+
+set -Eeuo pipefail
+
+normalize_boolean() {
+  local normalized_value
+  normalized_value="${1,,}"
+  case "${normalized_value}" in
+    1|true|yes|on) printf '%s' true ;;
+    0|false|no|off) printf '%s' false ;;
+    *) printf 'Invalid boolean value: %s\n' "$1" >&2; return 2 ;;
+  esac
+}
+
+main() {
+  local cloakserve_binary
+  local headless_enabled
+  local preserve_profiles_enabled
+  local allow_third_party_cookies
+  local start_maximized
+  local -a cloakserve_arguments
+
+  cloakserve_binary="${CLOAKSERVE_BINARY:-/usr/local/bin/cloakserve}"
+  headless_enabled="$(normalize_boolean "${CLOAKSERVE_HEADLESS:-false}")"
+  preserve_profiles_enabled="$(normalize_boolean "${CLOAKSERVE_PRESERVE_PROFILES:-true}")"
+  allow_third_party_cookies="$(normalize_boolean "${CLOAKBROWSER_FINGERPRINT_ALLOW_3P_COOKIES:-true}")"
+  start_maximized="$(normalize_boolean "${CLOAKBROWSER_START_MAXIMIZED:-true}")"
+
+  cloakserve_arguments=(
+    "--port=${CLOAKSERVE_PORT:-9222}"
+    "--data-dir=${CLOAKSERVE_DATA_DIR:-/root/.cloakbrowser/profiles/macos}"
+    "--idle-timeout=${CLOAKSERVE_IDLE_TIMEOUT:-0}"
+    "--preserve-profiles=${preserve_profiles_enabled}"
+    "--fingerprint=${CLOAKBROWSER_FINGERPRINT:-18929}"
+    "--fingerprint-platform=${CLOAKBROWSER_FINGERPRINT_PLATFORM:-macos}"
+    "--fingerprint-brand=${CLOAKBROWSER_FINGERPRINT_BRAND:-Chrome}"
+    "--fingerprint-timezone=${CLOAKBROWSER_FINGERPRINT_TIMEZONE:-America/New_York}"
+    "--fingerprint-locale=${CLOAKBROWSER_FINGERPRINT_LOCALE:-en-US}"
+    "--fingerprint-noise=${CLOAKBROWSER_FINGERPRINT_NOISE:-false}"
+    "--fingerprint-storage-quota=${CLOAKBROWSER_FINGERPRINT_STORAGE_QUOTA:-5000}"
+  )
+
+  if [[ "${headless_enabled}" == false ]]; then
+    cloakserve_arguments+=("--headless=false")
+  fi
+  if [[ "${allow_third_party_cookies}" == true ]]; then
+    cloakserve_arguments+=("--fingerprint-allow-3p-cookies")
+  fi
+  if [[ "${start_maximized}" == true ]]; then
+    cloakserve_arguments+=("--start-maximized")
+  fi
+
+  exec "${cloakserve_binary}" "${cloakserve_arguments[@]}" "$@"
+}
+
+main "$@"

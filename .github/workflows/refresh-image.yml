@@ -1,0 +1,195 @@
+name: Refresh CloakBrowser image
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: refresh-cloakbrowser-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.upstream.outputs.changed }}
+      sha: ${{ steps.upstream.outputs.sha }}
+    steps:
+      - name: Resolve upstream main and check immutable image tag
+        id: upstream
+        env:
+          IMAGE_NAME: ghcr.io/cjangrist/cloakbrowser-macos
+        run: |
+          set -Eeuo pipefail
+          upstream_sha="$(git ls-remote https://github.com/CloakHQ/CloakBrowser.git refs/heads/main | awk '{print $1}')"
+          if [[ ! "${upstream_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            printf 'Could not resolve upstream main revision\n' >&2
+            exit 1
+          fi
+          printf 'sha=%s\n' "${upstream_sha}" >> "${GITHUB_OUTPUT}"
+          if docker buildx imagetools inspect "${IMAGE_NAME}:upstream-${upstream_sha}" >/dev/null 2>&1; then
+            printf 'changed=false\n' >> "${GITHUB_OUTPUT}"
+            printf 'Upstream %s is already published; no build is needed.\n' "${upstream_sha}"
+          else
+            printf 'changed=true\n' >> "${GITHUB_OUTPUT}"
+            printf 'Upstream %s has not been published.\n' "${upstream_sha}"
+          fi
+
+  build-test-publish:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      IMAGE_NAME: ghcr.io/cjangrist/cloakbrowser-macos
+      UPSTREAM_SHA: ${{ needs.check-upstream.outputs.sha }}
+    steps:
+      - name: Check out image repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Check out exact upstream revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: CloakHQ/CloakBrowser
+          ref: ${{ env.UPSTREAM_SHA }}
+          path: upstream
+
+      - name: Apply persistent profile and Widevine source patch
+        run: |
+          set -Eeuo pipefail
+          git -C upstream apply --check ../patches/0001-persistent-cloakserve-profiles.patch
+          git -C upstream apply ../patches/0001-persistent-cloakserve-profiles.patch
+          git -C upstream diff --check
+
+      - name: Test patched CloakServe source
+        run: |
+          set -Eeuo pipefail
+          python3 -m pip install --disable-pip-version-check './upstream[serve,geoip]' pytest pytest-asyncio
+          python3 -m pytest upstream/tests/test_cloakserve.py -q
+
+      - name: Test environment launcher
+        run: bash tests/test_launcher.sh
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+
+      - name: Authenticate to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build local release candidate from upstream source
+        run: docker buildx bake test --load
+
+      - name: Start headed CDP browser
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "${RUNNER_TEMP}/cloakbrowser-results"
+          docker volume create cloakbrowser-macos-ci-profile
+          docker run --detach \
+            --name cloakbrowser-macos-ci-initial \
+            --publish 127.0.0.1:9222:9222 \
+            --volume cloakbrowser-macos-ci-profile:/root/.cloakbrowser \
+            --volume "${GITHUB_WORKSPACE}/tests:/tests:ro" \
+            --volume "${RUNNER_TEMP}/cloakbrowser-results:/test-results" \
+            cloakbrowser-macos:test
+          for attempt in $(seq 1 120); do
+            if curl --fail --silent http://127.0.0.1:9222/json/version >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs cloakbrowser-macos-ci-initial
+          exit 1
+
+      - name: Validate fingerprint, CDP, Widevine, and initial profile state
+        run: |
+          set -Eeuo pipefail
+          docker exec cloakbrowser-macos-ci-initial python /tests/runtime_smoke.py \
+            --phase initialize \
+            --output /test-results/initial.json
+          docker exec cloakbrowser-macos-ci-initial bash -ec '
+            chrome_command="$(tr "\0" " " </proc/$(pgrep -o chrome)/cmdline)"
+            [[ "${chrome_command}" != *"--headless"* ]]
+            [[ "${chrome_command}" == *"--fingerprint=18929"* ]]
+            [[ "${chrome_command}" == *"--fingerprint-platform=macos"* ]]
+            [[ "${chrome_command}" == *"--start-maximized"* ]]
+            test "$(grep -o -- "--fingerprint-platform=" <<<"${chrome_command}" | wc -l)" -eq 1
+            test -f /root/.cloakbrowser/WidevineCdm/manifest.json
+            test -f /root/.cloakbrowser/profiles/macos/18929/WidevineCdm/latest-component-updated-widevine-cdm
+          '
+
+      - name: Measure initial runtime resources
+        run: |
+          set -Eeuo pipefail
+          docker stats --no-stream cloakbrowser-macos-ci-initial
+          docker exec cloakbrowser-macos-ci-initial bash -ec '
+            printf "memory.current="; cat /sys/fs/cgroup/memory.current
+            printf "memory.peak="; cat /sys/fs/cgroup/memory.peak
+            printf "memory.events\n"; cat /sys/fs/cgroup/memory.events
+            printf "cpu.stat\n"; cat /sys/fs/cgroup/cpu.stat
+            printf "pids.current="; cat /sys/fs/cgroup/pids.current
+            printf "pids.max="; cat /sys/fs/cgroup/pids.max
+            ps -eo pid,ppid,pcpu,pmem,rss,nlwp,etime,comm,args --sort=-rss
+            du -sh /root/.cloakbrowser /root/.cloakbrowser/profiles/macos/18929
+          '
+
+      - name: Recreate container with the same profile volume
+        run: |
+          set -Eeuo pipefail
+          initial_pid="$(curl --fail --silent http://127.0.0.1:9222/ | jq -r '.processes["18929"].pid')"
+          sleep 40
+          current_pid="$(curl --fail --silent http://127.0.0.1:9222/ | jq -r '.processes["18929"].pid')"
+          test "${initial_pid}" = "${current_pid}"
+          docker stop --time 30 cloakbrowser-macos-ci-initial
+          docker run --detach \
+            --name cloakbrowser-macos-ci-recreated \
+            --publish 127.0.0.1:9222:9222 \
+            --volume cloakbrowser-macos-ci-profile:/root/.cloakbrowser \
+            --volume "${GITHUB_WORKSPACE}/tests:/tests:ro" \
+            --volume "${RUNNER_TEMP}/cloakbrowser-results:/test-results" \
+            cloakbrowser-macos:test
+          for attempt in $(seq 1 120); do
+            if curl --fail --silent http://127.0.0.1:9222/json/version >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs cloakbrowser-macos-ci-recreated
+          exit 1
+
+      - name: Verify profile and fingerprint after recreation
+        run: |
+          set -Eeuo pipefail
+          docker exec cloakbrowser-macos-ci-recreated python /tests/runtime_smoke.py \
+            --phase verify \
+            --baseline /test-results/initial.json \
+            --output /test-results/recreated.json
+          docker stats --no-stream cloakbrowser-macos-ci-recreated
+          docker exec cloakbrowser-macos-ci-recreated bash -ec '
+            printf "memory.current="; cat /sys/fs/cgroup/memory.current
+            printf "memory.peak="; cat /sys/fs/cgroup/memory.peak
+            printf "cpu.stat\n"; cat /sys/fs/cgroup/cpu.stat
+            printf "pids.current="; cat /sys/fs/cgroup/pids.current
+            ps -eo pid,ppid,pcpu,pmem,rss,nlwp,etime,comm,args --sort=-rss
+            du -sh /root/.cloakbrowser /root/.cloakbrowser/profiles/macos/18929
+          '
+
+      - name: Publish immutable and latest tags
+        run: docker buildx bake release --push
+
+      - name: Verify public immutable and latest tags
+        run: |
+          set -Eeuo pipefail
+          docker logout ghcr.io
+          docker buildx imagetools inspect "${IMAGE_NAME}:upstream-${UPSTREAM_SHA}"
+          docker buildx imagetools inspect "${IMAGE_NAME}:latest"

@@ -1,0 +1,4 @@
+upstream/
+test-results/
+tmp/
+trash/

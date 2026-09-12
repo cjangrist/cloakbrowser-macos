@@ -1,0 +1,243 @@
+diff --git a/bin/cloakserve b/bin/cloakserve
+index 0e545b2..25d807f 100755
+--- a/bin/cloakserve
++++ b/bin/cloakserve
+@@ -40,6 +40,7 @@ from aiohttp import web
+ 
+ from cloakbrowser.browser import build_args, maybe_resolve_geoip, _resolve_webrtc_args, _normalize_socks_string_url
+ from cloakbrowser.download import ensure_binary
++from cloakbrowser.widevine import seed_widevine_hint
+ 
+ logging.basicConfig(
+     level=logging.INFO,
+@@ -182,6 +183,7 @@ class ChromePool:
+         default_locale: str | None = None,
+         default_timezone: str | None = None,
+         idle_timeout: float = 0.0,
++        preserve_profiles: bool = False,
+     ):
+         self._binary = binary
+         self._global_args = global_args
+@@ -191,6 +193,7 @@ class ChromePool:
+         self._default_locale = default_locale
+         self._default_timezone = default_timezone
+         self._idle_timeout = idle_timeout
++        self._preserve_profiles = preserve_profiles
+         self._processes: dict[str, ChromeProcess] = {}
+         self._default: ChromeProcess | None = None
+         self._locks: dict[str, asyncio.Lock] = {}
+@@ -340,6 +343,7 @@ class ChromePool:
+ 
+             # Build Chrome args via shared logic
+             fp_extra = [f"--fingerprint={actual_seed}"]
++            fp_extra.extend(self._global_args)
+             if extra_args:
+                 fp_extra.extend(extra_args)
+             if proxy:
+@@ -363,12 +367,12 @@ class ChromePool:
+             port = self._allocate_port()
+             user_data_dir = os.path.join(self._data_dir, seed_key)
+             os.makedirs(user_data_dir, exist_ok=True)
++            seed_widevine_hint(user_data_dir, self._binary)
+ 
+             full_args = (
+                 [self._binary]
+                 + BASE_CHROME_ARGS
+                 + chrome_args
+-                + self._global_args
+                 + [
+                     f"--remote-debugging-port={port}",
+                     "--remote-debugging-address=127.0.0.1",
+@@ -386,7 +390,8 @@ class ChromePool:
+             if not await self._wait_for_cdp(port):
+                 process.kill()
+                 await asyncio.to_thread(process.wait, timeout=5)
+-                await asyncio.to_thread(self._safe_rmtree, user_data_dir)
++                if not self._preserve_profiles:
++                    await asyncio.to_thread(self._safe_rmtree, user_data_dir)
+                 raise web.HTTPBadGateway(
+                     text=json.dumps({"error": "Chrome failed to start"}),
+                     content_type="application/json",
+@@ -421,7 +426,8 @@ class ChromePool:
+                 await asyncio.to_thread(proc.process.wait, timeout=5)
+             except subprocess.TimeoutExpired:
+                 proc.process.kill()
+-        await asyncio.to_thread(self._safe_rmtree, proc.user_data_dir)
++        if not self._preserve_profiles:
++            await asyncio.to_thread(self._safe_rmtree, proc.user_data_dir)
+         if self._default is proc:
+             self._default = None
+         self._locks.pop(key, None)
+@@ -793,6 +799,22 @@ def _default_idle_timeout() -> float:
+     return _parse_idle_timeout(value)
+ 
+ 
++def _parse_boolean(value: str) -> bool:
++    normalized = value.strip().lower()
++    if normalized in {"1", "true", "yes", "on"}:
++        return True
++    if normalized in {"0", "false", "no", "off"}:
++        return False
++    raise ValueError(f"invalid boolean value: {value!r}")
++
++
++def _default_preserve_profiles() -> bool:
++    value = os.environ.get("CLOAKSERVE_PRESERVE_PROFILES")
++    if value is None:
++        return False
++    return _parse_boolean(value)
++
++
+ def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
+     """Parse cloakserve-specific args, return (config, passthrough_args).
+ 
+@@ -809,6 +831,7 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
+         "default_locale": None,
+         "default_timezone": None,
+         "idle_timeout": _default_idle_timeout(),
++        "preserve_profiles": _default_preserve_profiles(),
+     }
+     passthrough = []
+     # Flags consumed by cloakserve (not passed to Chrome)
+@@ -816,6 +839,7 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
+         "--port=",
+         "--data-dir=",
+         "--idle-timeout=",
++        "--preserve-profiles=",
+         "--remote-debugging-port=",
+         "--remote-debugging-address=",
+     )
+@@ -827,9 +851,12 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
+             config["data_dir"] = arg.split("=", 1)[1]
+         elif arg.startswith("--idle-timeout="):
+             config["idle_timeout"] = _parse_idle_timeout(arg.split("=", 1)[1])
++        elif arg == "--preserve-profiles":
++            config["preserve_profiles"] = True
++        elif arg.startswith("--preserve-profiles="):
++            config["preserve_profiles"] = _parse_boolean(arg.split("=", 1)[1])
+         elif arg == "--headless=false" or arg == "--headless=False":
+             config["headless"] = False
+-            passthrough.append(arg)
+         elif arg.startswith(consumed_prefixes):
+             pass  # Strip these silently
+         # Route through build_args() so companion flags are set correctly
+@@ -872,6 +899,7 @@ def main() -> None:
+         default_locale=config["default_locale"],
+         default_timezone=config["default_timezone"],
+         idle_timeout=config["idle_timeout"],
++        preserve_profiles=config["preserve_profiles"],
+     )
+ 
+     app = web.Application()
+diff --git a/bin/docker-entrypoint.sh b/bin/docker-entrypoint.sh
+index feb1b55..d5e2f54 100644
+--- a/bin/docker-entrypoint.sh
++++ b/bin/docker-entrypoint.sh
+@@ -7,8 +7,32 @@
+ # returning 502 forever. See CloakHQ/CloakBrowser#283.
+ rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
+ 
++# Preserve the profile while moving stale Chromium singleton locks out of the
++# active user-data directory after a container restart. A container hostname is
++# part of Chromium's lock target, so a cleanly stopped prior container otherwise
++# leaves a lock that the replacement container cannot claim.
++_profile_root="${CLOAKSERVE_DATA_DIR:-}"
++if [ -n "${_profile_root}" ] && [ -d "${_profile_root}" ]; then
++  _stale_lock_root="${_profile_root}/.stale_profile_locks/$(date -u +%Y%m%dT%H%M%SZ)_$$"
++  for _profile_dir in "${_profile_root}"/*; do
++    [ -d "${_profile_dir}" ] || continue
++    for _lock_name in SingletonLock SingletonCookie SingletonSocket; do
++      _lock_path="${_profile_dir}/${_lock_name}"
++      if [ -e "${_lock_path}" ] || [ -L "${_lock_path}" ]; then
++        mkdir -p "${_stale_lock_root}/$(basename "${_profile_dir}")"
++        mv "${_lock_path}" "${_stale_lock_root}/$(basename "${_profile_dir}")/${_lock_name}"
++      fi
++    done
++  done
++fi
++
+ # Start Xvfb for headed mode (Turnstile, CAPTCHAs), then run user command
+-Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp &
++_display_width="${CLOAKBROWSER_DISPLAY_WIDTH:-1920}"
++_display_height="${CLOAKBROWSER_DISPLAY_HEIGHT:-1080}"
++case "${_display_width}:${_display_height}" in
++  *[!0-9:]*|:*|*:) echo "[cloakbrowser] Invalid virtual display dimensions" >&2; exit 2 ;;
++esac
++Xvfb :99 -screen 0 "${_display_width}x${_display_height}x24" -nolisten tcp &
+ 
+ # Wait for the X server to actually accept connections before starting the WM.
+ # A blind `sleep 1` races under a CPU-starved start: openbox can come up before
+diff --git a/tests/test_cloakserve.py b/tests/test_cloakserve.py
+index 268b120..5175ee6 100644
+--- a/tests/test_cloakserve.py
++++ b/tests/test_cloakserve.py
+@@ -94,6 +94,7 @@ class TestParseCliArgs:
+         assert config["headless"] is True
+         assert config["data_dir"] is not None
+         assert config["idle_timeout"] == 0.0
++        assert config["preserve_profiles"] is False
+         assert passthrough == []
+ 
+     def test_custom_port(self):
+@@ -103,8 +104,7 @@ class TestParseCliArgs:
+     def test_headless_false(self):
+         config, passthrough = parse_cli_args(["--headless=false"])
+         assert config["headless"] is False
+-        # headless flag still passed through to Chrome
+-        assert "--headless=false" in passthrough
++        assert "--headless=false" not in passthrough
+ 
+     def test_strips_remote_debugging_flags(self):
+         args = ["--remote-debugging-port=9999", "--remote-debugging-address=0.0.0.0", "--no-sandbox"]
+@@ -157,6 +157,21 @@ class TestParseCliArgs:
+         with pytest.raises(ValueError):
+             parse_cli_args(["--idle-timeout=-1"])
+ 
++    def test_preserve_profiles_flag(self):
++        config, passthrough = parse_cli_args(["--preserve-profiles"])
++        assert config["preserve_profiles"] is True
++        assert "--preserve-profiles" not in passthrough
++
++    def test_preserve_profiles_env_default(self, monkeypatch):
++        monkeypatch.setenv("CLOAKSERVE_PRESERVE_PROFILES", "true")
++        config, _ = parse_cli_args([])
++        assert config["preserve_profiles"] is True
++
++    def test_preserve_profiles_cli_overrides_env(self, monkeypatch):
++        monkeypatch.setenv("CLOAKSERVE_PRESERVE_PROFILES", "true")
++        config, _ = parse_cli_args(["--preserve-profiles=false"])
++        assert config["preserve_profiles"] is False
++
+     @patch("os.path.exists", return_value=True)
+     def test_default_data_dir_docker(self, _mock):
+         assert _default_data_dir() == "/tmp/cloakserve"
+@@ -676,3 +691,29 @@ class TestSafeRmtree:
+         pool._safe_rmtree(traversal)
+ 
+         assert victim.exists(), "Traversal path must not be deleted"
++
++    def test_cleanup_preserves_profile_when_enabled(self, tmp_path):
++        async def run():
++            data_dir = tmp_path / "profiles"
++            profile_dir = data_dir / "seed-12345"
++            profile_dir.mkdir(parents=True)
++            sentinel = profile_dir / "sentinel"
++            sentinel.touch()
++            process = SimpleNamespace(poll=lambda: 0)
++            pool = ChromePool(
++                binary="/fake/chrome",
++                global_args=[],
++                headless=True,
++                data_dir=str(data_dir),
++                preserve_profiles=True,
++            )
++            pool._processes["seed-12345"] = SimpleNamespace(
++                process=process,
++                user_data_dir=str(profile_dir),
++            )
++
++            await pool._cleanup_process("seed-12345")
++
++            assert sentinel.exists(), "Persistent profile must survive process cleanup"
++
++        asyncio.run(run())
