@@ -74,18 +74,20 @@ jobs:
           ref: ${{ env.UPSTREAM_SHA }}
           path: upstream
 
-      - name: Apply persistent profile and Widevine source patch
+      - name: Apply profile, Widevine, and CDP recovery source patches
         run: |
           set -Eeuo pipefail
-          git -C upstream apply --check ../patches/0001-persistent-cloakserve-profiles.patch
-          git -C upstream apply ../patches/0001-persistent-cloakserve-profiles.patch
+          for source_patch in patches/*.patch; do
+            git -C upstream apply --check "../${source_patch}"
+            git -C upstream apply "../${source_patch}"
+          done
           git -C upstream diff --check
 
       - name: Test patched CloakServe source
         run: |
           set -Eeuo pipefail
           python3 -m pip install --disable-pip-version-check './upstream[serve,geoip]' pytest pytest-asyncio
-          python3 -m pytest upstream/tests/test_cloakserve.py -q
+          UPSTREAM_CONTEXT=upstream python3 -m pytest upstream/tests/test_cloakserve.py tests/test_cdp_recovery.py -q
 
       - name: Test environment launcher
         run: |
@@ -115,6 +117,7 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/cloakbrowser-results"
           docker volume create cloakbrowser-macos-ci-profile
           docker run --detach \
+            --init --ulimit core=0 \
             --name cloakbrowser-macos-ci-initial \
             --publish 127.0.0.1:9222:9222 \
             --volume cloakbrowser-macos-ci-profile:/root/.cloakbrowser \
@@ -175,6 +178,9 @@ jobs:
             >"${RUNNER_TEMP}/cloakbrowser-cached-info.json"
           jq --exit-status '.fonts.macos == [20, 20]' "${RUNNER_TEMP}/cloakbrowser-cached-info.json"
 
+      - name: Verify real browser crash and cached-CDP recovery
+        run: docker exec cloakbrowser-macos-ci-initial python /tests/runtime_recovery.py
+
       - name: Measure initial runtime resources
         run: |
           set -Eeuo pipefail
@@ -199,6 +205,7 @@ jobs:
           test "${initial_pid}" = "${current_pid}"
           docker stop --time 30 cloakbrowser-macos-ci-initial
           docker run --detach \
+            --init --ulimit core=0 \
             --name cloakbrowser-macos-ci-recreated \
             --publish 127.0.0.1:9222:9222 \
             --volume cloakbrowser-macos-ci-profile:/root/.cloakbrowser \

@@ -1,0 +1,141 @@
+diff --git a/bin/cloakserve b/bin/cloakserve
+index 25d807f..f1bf81a 100755
+--- a/bin/cloakserve
++++ b/bin/cloakserve
+@@ -386,16 +386,20 @@ class ChromePool:
+                 stdout=subprocess.DEVNULL,
+             )
+ 
+-            # Wait for CDP to be ready
+-            if not await self._wait_for_cdp(port):
+-                process.kill()
++            # A cancelled launch must not leave an unregistered browser alive.
++            try:
++                if not await self._wait_for_cdp(port):
++                    raise web.HTTPBadGateway(
++                        text=json.dumps({"error": "Chrome failed to start"}),
++                        content_type="application/json",
++                    )
++            except BaseException:
++                if process.poll() is None:
++                    process.kill()
+                 await asyncio.to_thread(process.wait, timeout=5)
+                 if not self._preserve_profiles:
+                     await asyncio.to_thread(self._safe_rmtree, user_data_dir)
+-                raise web.HTTPBadGateway(
+-                    text=json.dumps({"error": "Chrome failed to start"}),
+-                    content_type="application/json",
+-                )
++                raise
+ 
+             cp = ChromeProcess(
+                 seed=actual_seed,
+@@ -426,11 +430,13 @@ class ChromePool:
+                 await asyncio.to_thread(proc.process.wait, timeout=5)
+             except subprocess.TimeoutExpired:
+                 proc.process.kill()
++                await asyncio.to_thread(proc.process.wait, timeout=5)
+         if not self._preserve_profiles:
+             await asyncio.to_thread(self._safe_rmtree, proc.user_data_dir)
+         if self._default is proc:
+             self._default = None
+-        self._locks.pop(key, None)
++        # Keep the canonical lock across process generations. Replacing it
++        # while callers wait on the old lock permits duplicate profile launches.
+         self._connections.pop(key, None)
+ 
+     async def terminate_seed(self, seed: str) -> bool:
+@@ -674,15 +680,22 @@ async def handle_json_list(request: web.Request) -> web.Response:
+ # ---------------------------------------------------------------------------
+ 
+ async def proxy_cdp_websocket(
+-    client_ws: web.WebSocketResponse,
++    request: web.Request,
+     target_url: str,
+     label: str,
+-) -> None:
++) -> web.WebSocketResponse:
+     """Bidirectional WebSocket proxy between client and Chrome CDP."""
++    client_ws = web.WebSocketResponse()
++    tasks = []
+     try:
+         async with websockets.connect(
+             target_url, max_size=None, ping_interval=None, ping_timeout=None,
++            open_timeout=5, close_timeout=1,
+         ) as cdp_ws:
++            # Do not acknowledge the client upgrade until Chrome accepts this
++            # exact endpoint. An obsolete browser GUID must fail the handshake
++            # so CDP clients invalidate their discovery cache and retry.
++            await client_ws.prepare(request)
+             logger.info("%s: connected to %s", label, target_url)
+ 
+             async def client_to_cdp():
+@@ -709,15 +722,25 @@ async def proxy_cdp_websocket(
+ 
+             c2d = asyncio.create_task(client_to_cdp(), name="c2d")
+             d2c = asyncio.create_task(cdp_to_client(), name="d2c")
+-            done, pending = await asyncio.wait(
+-                [c2d, d2c], return_when=asyncio.FIRST_COMPLETED,
++            tasks = [c2d, d2c]
++            await asyncio.wait(
++                tasks, return_when=asyncio.FIRST_COMPLETED,
+             )
+-            for task in pending:
+-                task.cancel()
+             logger.info("%s: disconnected", label)
+ 
+     except Exception as exc:
+         logger.error("%s error: %s", label, exc)
++        if not client_ws.prepared:
++            raise web.HTTPBadGateway(text="CDP endpoint unavailable") from exc
++    finally:
++        for task in tasks:
++            if not task.done():
++                task.cancel()
++        if tasks:
++            await asyncio.gather(*tasks, return_exceptions=True)
++        if client_ws.prepared:
++            await client_ws.close()
++    return client_ws
+ 
+ 
+ async def handle_ws_default(request: web.Request) -> web.StreamResponse:
+@@ -731,16 +754,13 @@ async def handle_ws_default(request: web.Request) -> web.StreamResponse:
+ 
+     cp = await pool.get_or_launch(seed=None)
+ 
+-    ws = web.WebSocketResponse()
+-    await ws.prepare(request)
+-
+-    pool.connect("__default__")
++    seed_key = pool._default_seed or "__default__"
++    pool.connect(seed_key)
+     try:
+         target_url = f"ws://127.0.0.1:{cp.cdp_port}/devtools/{path}"
+-        await proxy_cdp_websocket(ws, target_url, f"CDP default [{path}]")
++        return await proxy_cdp_websocket(request, target_url, f"CDP default [{path}]")
+     finally:
+-        pool.disconnect("__default__")
+-    return ws
++        pool.disconnect(seed_key)
+ 
+ 
+ async def handle_ws_seed(request: web.Request) -> web.StreamResponse:
+@@ -755,16 +775,12 @@ async def handle_ws_seed(request: web.Request) -> web.StreamResponse:
+ 
+     cp = await pool.get_or_launch(seed=seed)
+ 
+-    ws = web.WebSocketResponse()
+-    await ws.prepare(request)
+-
+     pool.connect(seed)
+     try:
+         target_url = f"ws://127.0.0.1:{cp.cdp_port}/devtools/{path}"
+-        await proxy_cdp_websocket(ws, target_url, f"CDP seed={seed} [{path}]")
++        return await proxy_cdp_websocket(request, target_url, f"CDP seed={seed} [{path}]")
+     finally:
+         pool.disconnect(seed)
+-    return ws
+ 
+ 
+ async def on_shutdown(app: web.Application) -> None:
