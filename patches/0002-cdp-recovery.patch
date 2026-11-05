@@ -1,8 +1,8 @@
 diff --git a/bin/cloakserve b/bin/cloakserve
-index 25d807f..f1bf81a 100755
+index 3f57885..22e229e 100755
 --- a/bin/cloakserve
 +++ b/bin/cloakserve
-@@ -386,16 +386,20 @@ class ChromePool:
+@@ -399,16 +399,20 @@ class ChromePool:
                  stdout=subprocess.DEVNULL,
              )
  
@@ -30,8 +30,8 @@ index 25d807f..f1bf81a 100755
  
              cp = ChromeProcess(
                  seed=actual_seed,
-@@ -426,11 +430,13 @@ class ChromePool:
-                 await asyncio.to_thread(proc.process.wait, timeout=5)
+@@ -448,11 +452,13 @@ class ChromePool:
+                 await asyncio.to_thread(proc.process.wait, timeout=10)
              except subprocess.TimeoutExpired:
                  proc.process.kill()
 +                await asyncio.to_thread(proc.process.wait, timeout=5)
@@ -45,8 +45,8 @@ index 25d807f..f1bf81a 100755
          self._connections.pop(key, None)
  
      async def terminate_seed(self, seed: str) -> bool:
-@@ -674,15 +680,22 @@ async def handle_json_list(request: web.Request) -> web.Response:
- # ---------------------------------------------------------------------------
+@@ -702,15 +708,22 @@ WS_HEARTBEAT_SECONDS = 30
+ 
  
  async def proxy_cdp_websocket(
 -    client_ws: web.WebSocketResponse,
@@ -56,7 +56,7 @@ index 25d807f..f1bf81a 100755
 -) -> None:
 +) -> web.WebSocketResponse:
      """Bidirectional WebSocket proxy between client and Chrome CDP."""
-+    client_ws = web.WebSocketResponse()
++    client_ws = web.WebSocketResponse(heartbeat=WS_HEARTBEAT_SECONDS)
 +    tasks = []
      try:
          async with websockets.connect(
@@ -70,7 +70,7 @@ index 25d807f..f1bf81a 100755
              logger.info("%s: connected to %s", label, target_url)
  
              async def client_to_cdp():
-@@ -709,15 +722,25 @@ async def proxy_cdp_websocket(
+@@ -737,15 +750,25 @@ async def proxy_cdp_websocket(
  
              c2d = asyncio.create_task(client_to_cdp(), name="c2d")
              d2c = asyncio.create_task(cdp_to_client(), name="d2c")
@@ -100,11 +100,11 @@ index 25d807f..f1bf81a 100755
  
  
  async def handle_ws_default(request: web.Request) -> web.StreamResponse:
-@@ -731,16 +754,13 @@ async def handle_ws_default(request: web.Request) -> web.StreamResponse:
+@@ -759,20 +782,17 @@ async def handle_ws_default(request: web.Request) -> web.StreamResponse:
  
      cp = await pool.get_or_launch(seed=None)
  
--    ws = web.WebSocketResponse()
+-    ws = web.WebSocketResponse(heartbeat=WS_HEARTBEAT_SECONDS)
 -    await ws.prepare(request)
 -
 -    pool.connect("__default__")
@@ -121,11 +121,16 @@ index 25d807f..f1bf81a 100755
  
  
  async def handle_ws_seed(request: web.Request) -> web.StreamResponse:
-@@ -755,16 +775,12 @@ async def handle_ws_seed(request: web.Request) -> web.StreamResponse:
+-    """WebSocket proxy for seed-specific Chrome: /fingerprint/{seed}/devtools/{type}/{guid}"""
++    """WebSocket proxy for seed-specific Chrome: /fingerprint/{seed}/devtools/{path:.+}"""
+     rejected = _reject_untrusted_origin(request)
+     if rejected is not None:
+         return rejected
+@@ -783,16 +803,12 @@ async def handle_ws_seed(request: web.Request) -> web.StreamResponse:
  
      cp = await pool.get_or_launch(seed=seed)
  
--    ws = web.WebSocketResponse()
+-    ws = web.WebSocketResponse(heartbeat=WS_HEARTBEAT_SECONDS)
 -    await ws.prepare(request)
 -
      pool.connect(seed)
@@ -139,3 +144,30 @@ index 25d807f..f1bf81a 100755
  
  
  async def on_shutdown(app: web.Application) -> None:
+diff --git a/tests/test_cloakserve.py b/tests/test_cloakserve.py
+index 77af9b2..2aea887 100644
+--- a/tests/test_cloakserve.py
++++ b/tests/test_cloakserve.py
+@@ -835,6 +835,8 @@ class TestClientHeartbeat:
+         events = []
+ 
+         class Pool:
++            _default_seed = None
++
+             async def get_or_launch(self, seed=None):
+                 return SimpleNamespace(cdp_port=1)
+ 
+@@ -844,9 +846,12 @@ class TestClientHeartbeat:
+             def disconnect(self, key):
+                 events.append("disconnect")
+ 
+-        async def fake_proxy(client_ws, target_url, label):
++        async def fake_proxy(request, target_url, label):
++            client_ws = web.WebSocketResponse(heartbeat=_mod.WS_HEARTBEAT_SECONDS)
++            await client_ws.prepare(request)
+             async for _ in client_ws:
+                 pass
++            return client_ws
+ 
+         async def run():
+             app = web.Application()

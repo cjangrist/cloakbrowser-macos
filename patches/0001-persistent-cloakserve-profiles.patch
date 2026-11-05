@@ -1,8 +1,8 @@
 diff --git a/bin/cloakserve b/bin/cloakserve
-index 0e545b2..25d807f 100755
+index 0eb17f5..3f57885 100755
 --- a/bin/cloakserve
 +++ b/bin/cloakserve
-@@ -40,6 +40,7 @@ from aiohttp import web
+@@ -41,6 +41,7 @@ from aiohttp import web
  
  from cloakbrowser.browser import build_args, maybe_resolve_geoip, _resolve_webrtc_args, _normalize_socks_string_url
  from cloakbrowser.download import ensure_binary
@@ -10,23 +10,18 @@ index 0e545b2..25d807f 100755
  
  logging.basicConfig(
      level=logging.INFO,
-@@ -182,6 +183,7 @@ class ChromePool:
-         default_locale: str | None = None,
+@@ -184,8 +185,10 @@ class ChromePool:
          default_timezone: str | None = None,
          idle_timeout: float = 0.0,
+         keep_profiles: bool = False,
 +        preserve_profiles: bool = False,
      ):
+         self._keep_profiles = keep_profiles
++        self._preserve_profiles = preserve_profiles
          self._binary = binary
          self._global_args = global_args
-@@ -191,6 +193,7 @@ class ChromePool:
-         self._default_locale = default_locale
-         self._default_timezone = default_timezone
-         self._idle_timeout = idle_timeout
-+        self._preserve_profiles = preserve_profiles
-         self._processes: dict[str, ChromeProcess] = {}
-         self._default: ChromeProcess | None = None
-         self._locks: dict[str, asyncio.Lock] = {}
-@@ -340,6 +343,7 @@ class ChromePool:
+         self._headless = headless
+@@ -353,6 +356,7 @@ class ChromePool:
  
              # Build Chrome args via shared logic
              fp_extra = [f"--fingerprint={actual_seed}"]
@@ -34,7 +29,7 @@ index 0e545b2..25d807f 100755
              if extra_args:
                  fp_extra.extend(extra_args)
              if proxy:
-@@ -363,12 +367,12 @@ class ChromePool:
+@@ -376,12 +380,12 @@ class ChromePool:
              port = self._allocate_port()
              user_data_dir = os.path.join(self._data_dir, seed_key)
              os.makedirs(user_data_dir, exist_ok=True)
@@ -48,7 +43,7 @@ index 0e545b2..25d807f 100755
                  + [
                      f"--remote-debugging-port={port}",
                      "--remote-debugging-address=127.0.0.1",
-@@ -386,7 +390,8 @@ class ChromePool:
+@@ -399,7 +403,8 @@ class ChromePool:
              if not await self._wait_for_cdp(port):
                  process.kill()
                  await asyncio.to_thread(process.wait, timeout=5)
@@ -58,8 +53,8 @@ index 0e545b2..25d807f 100755
                  raise web.HTTPBadGateway(
                      text=json.dumps({"error": "Chrome failed to start"}),
                      content_type="application/json",
-@@ -421,7 +426,8 @@ class ChromePool:
-                 await asyncio.to_thread(proc.process.wait, timeout=5)
+@@ -443,7 +448,8 @@ class ChromePool:
+                 await asyncio.to_thread(proc.process.wait, timeout=10)
              except subprocess.TimeoutExpired:
                  proc.process.kill()
 -        await asyncio.to_thread(self._safe_rmtree, proc.user_data_dir)
@@ -68,8 +63,8 @@ index 0e545b2..25d807f 100755
          if self._default is proc:
              self._default = None
          self._locks.pop(key, None)
-@@ -793,6 +799,22 @@ def _default_idle_timeout() -> float:
-     return _parse_idle_timeout(value)
+@@ -821,6 +827,22 @@ def _default_idle_timeout(env: str = "CLOAKSERVE_IDLE_TIMEOUT", flag: str = "--i
+     return _parse_idle_timeout(value, flag)
  
  
 +def _parse_boolean(value: str) -> bool:
@@ -88,52 +83,54 @@ index 0e545b2..25d807f 100755
 +    return _parse_boolean(value)
 +
 +
- def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
-     """Parse cloakserve-specific args, return (config, passthrough_args).
- 
-@@ -809,6 +831,7 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
-         "default_locale": None,
+ async def _exit_after_idle(pool: ChromePool, timeout: float) -> None:
+     """Stop the server once no CDP connection has been open for `timeout` seconds."""
+     while True:
+@@ -849,6 +871,7 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
          "default_timezone": None,
          "idle_timeout": _default_idle_timeout(),
+         "keep_profiles": False,
 +        "preserve_profiles": _default_preserve_profiles(),
+         "exit_after_idle": _default_idle_timeout("CLOAKSERVE_EXIT_AFTER_IDLE", "--exit-after-idle"),
      }
      passthrough = []
-     # Flags consumed by cloakserve (not passed to Chrome)
-@@ -816,6 +839,7 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
+@@ -857,6 +880,7 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
          "--port=",
          "--data-dir=",
          "--idle-timeout=",
 +        "--preserve-profiles=",
+         "--exit-after-idle=",
          "--remote-debugging-port=",
          "--remote-debugging-address=",
-     )
-@@ -827,9 +851,12 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
-             config["data_dir"] = arg.split("=", 1)[1]
-         elif arg.startswith("--idle-timeout="):
+@@ -871,11 +895,14 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
              config["idle_timeout"] = _parse_idle_timeout(arg.split("=", 1)[1])
+         elif arg == "--keep-profiles":
+             config["keep_profiles"] = True
 +        elif arg == "--preserve-profiles":
 +            config["preserve_profiles"] = True
 +        elif arg.startswith("--preserve-profiles="):
 +            config["preserve_profiles"] = _parse_boolean(arg.split("=", 1)[1])
+         elif arg.startswith("--exit-after-idle="):
+             config["exit_after_idle"] = _parse_idle_timeout(arg.split("=", 1)[1], "--exit-after-idle")
          elif arg == "--headless=false" or arg == "--headless=False":
              config["headless"] = False
 -            passthrough.append(arg)
          elif arg.startswith(consumed_prefixes):
              pass  # Strip these silently
          # Route through build_args() so companion flags are set correctly
-@@ -872,6 +899,7 @@ def main() -> None:
-         default_locale=config["default_locale"],
+@@ -919,6 +946,7 @@ def main() -> None:
          default_timezone=config["default_timezone"],
          idle_timeout=config["idle_timeout"],
+         keep_profiles=config["keep_profiles"],
 +        preserve_profiles=config["preserve_profiles"],
      )
  
      app = web.Application()
 diff --git a/bin/docker-entrypoint.sh b/bin/docker-entrypoint.sh
-index feb1b55..d5e2f54 100644
+index 9295cc2..5236e3d 100644
 --- a/bin/docker-entrypoint.sh
 +++ b/bin/docker-entrypoint.sh
-@@ -7,8 +7,32 @@
+@@ -7,10 +7,34 @@
  # returning 502 forever. See CloakHQ/CloakBrowser#283.
  rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
  
@@ -156,19 +153,21 @@ index feb1b55..d5e2f54 100644
 +  done
 +fi
 +
- # Start Xvfb for headed mode (Turnstile, CAPTCHAs), then run user command
--Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp &
+ # Start Xvfb for headed mode (Turnstile, CAPTCHAs), then run user command.
+ # setsid: its own session, so Ctrl+C in `docker run -it` reaches only the user's
+ # command, not the X server (which otherwise dies printing "XIO: fatal IO error").
+-setsid Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp &
 +_display_width="${CLOAKBROWSER_DISPLAY_WIDTH:-1920}"
 +_display_height="${CLOAKBROWSER_DISPLAY_HEIGHT:-1080}"
 +case "${_display_width}:${_display_height}" in
 +  *[!0-9:]*|:*|*:) echo "[cloakbrowser] Invalid virtual display dimensions" >&2; exit 2 ;;
 +esac
-+Xvfb :99 -screen 0 "${_display_width}x${_display_height}x24" -nolisten tcp &
++setsid Xvfb :99 -screen 0 "${_display_width}x${_display_height}x24" -nolisten tcp &
  
  # Wait for the X server to actually accept connections before starting the WM.
  # A blind `sleep 1` races under a CPU-starved start: openbox can come up before
 diff --git a/tests/test_cloakserve.py b/tests/test_cloakserve.py
-index 268b120..5175ee6 100644
+index 62c5119..77af9b2 100644
 --- a/tests/test_cloakserve.py
 +++ b/tests/test_cloakserve.py
 @@ -94,6 +94,7 @@ class TestParseCliArgs:
@@ -189,7 +188,7 @@ index 268b120..5175ee6 100644
  
      def test_strips_remote_debugging_flags(self):
          args = ["--remote-debugging-port=9999", "--remote-debugging-address=0.0.0.0", "--no-sandbox"]
-@@ -157,6 +157,21 @@ class TestParseCliArgs:
+@@ -163,6 +163,21 @@ class TestParseCliArgs:
          with pytest.raises(ValueError):
              parse_cli_args(["--idle-timeout=-1"])
  
@@ -208,14 +207,13 @@ index 268b120..5175ee6 100644
 +        config, _ = parse_cli_args(["--preserve-profiles=false"])
 +        assert config["preserve_profiles"] is False
 +
-     @patch("os.path.exists", return_value=True)
-     def test_default_data_dir_docker(self, _mock):
-         assert _default_data_dir() == "/tmp/cloakserve"
-@@ -676,3 +691,29 @@ class TestSafeRmtree:
-         pool._safe_rmtree(traversal)
+     def test_exit_after_idle(self, monkeypatch):
+         monkeypatch.delenv("CLOAKSERVE_EXIT_AFTER_IDLE", raising=False)
+         assert parse_cli_args([])[0]["exit_after_idle"] == 0.0
+@@ -779,6 +794,32 @@ class TestSafeRmtree:
  
          assert victim.exists(), "Traversal path must not be deleted"
-+
+ 
 +    def test_cleanup_preserves_profile_when_enabled(self, tmp_path):
 +        async def run():
 +            data_dir = tmp_path / "profiles"
@@ -241,3 +239,7 @@ index 268b120..5175ee6 100644
 +            assert sentinel.exists(), "Persistent profile must survive process cleanup"
 +
 +        asyncio.run(run())
++
+ 
+ class TestClientHeartbeat:
+     """A silently dead client must be detected so the connection is released."""

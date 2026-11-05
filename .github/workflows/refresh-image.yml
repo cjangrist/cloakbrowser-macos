@@ -111,6 +111,43 @@ jobs:
       - name: Build local release candidate from upstream source
         run: docker buildx bake test --load --provenance=false
 
+      - name: Stage signature-verified public CI browser binary
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import httpx
+          from cloakbrowser.download import (
+              _download_file,
+              _extract_archive,
+              _parse_checksums,
+              _parse_manifest_version,
+              _verify_checksum,
+              _verify_signature,
+          )
+
+          version = "146.0.7680.177.5"
+          archive_name = "cloakbrowser-linux-x64.tar.gz"
+          base = f"https://cloakbrowser.dev/chromium-v{version}"
+          manifest_resp = httpx.get(f"{base}/SHA256SUMS", follow_redirects=True, timeout=30.0)
+          manifest_resp.raise_for_status()
+          sig_resp = httpx.get(f"{base}/SHA256SUMS.sig", follow_redirects=True, timeout=30.0)
+          sig_resp.raise_for_status()
+          _verify_signature(manifest_resp.content, sig_resp.content)
+          manifest_text = manifest_resp.content.decode("utf-8")
+          if _parse_manifest_version(manifest_text) != version:
+              raise RuntimeError("Manifest version mismatch")
+          expected_sha = _parse_checksums(manifest_text)[archive_name]
+          runner_temp = Path(os.environ["RUNNER_TEMP"])
+          archive_path = runner_temp / archive_name
+          dest_dir = runner_temp / "ci-chromium"
+          _download_file(f"{base}/{archive_name}", archive_path)
+          _verify_checksum(archive_path, expected_sha)
+          _extract_archive(archive_path, dest_dir, dest_dir / "chrome")
+          archive_path.unlink(missing_ok=True)
+          PY
+
       - name: Start headed CDP browser
         run: |
           set -Eeuo pipefail
@@ -120,6 +157,8 @@ jobs:
             --init --ulimit core=0 \
             --name cloakbrowser-macos-ci-initial \
             --publish 127.0.0.1:9222:9222 \
+            --env CLOAKBROWSER_BINARY_PATH=/ci-chromium/chrome \
+            --volume "${RUNNER_TEMP}/ci-chromium:/ci-chromium:ro" \
             --volume cloakbrowser-macos-ci-profile:/root/.cloakbrowser \
             --volume "${GITHUB_WORKSPACE}/tests:/tests:ro" \
             --volume "${RUNNER_TEMP}/cloakbrowser-results:/test-results" \
@@ -208,6 +247,8 @@ jobs:
             --init --ulimit core=0 \
             --name cloakbrowser-macos-ci-recreated \
             --publish 127.0.0.1:9222:9222 \
+            --env CLOAKBROWSER_BINARY_PATH=/ci-chromium/chrome \
+            --volume "${RUNNER_TEMP}/ci-chromium:/ci-chromium:ro" \
             --volume cloakbrowser-macos-ci-profile:/root/.cloakbrowser \
             --volume "${GITHUB_WORKSPACE}/tests:/tests:ro" \
             --volume "${RUNNER_TEMP}/cloakbrowser-results:/test-results" \
