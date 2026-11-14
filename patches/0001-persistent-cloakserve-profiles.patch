@@ -1,5 +1,5 @@
 diff --git a/bin/cloakserve b/bin/cloakserve
-index 0eb17f5..3f57885 100755
+index 6753c19..7eaaaa4 100755
 --- a/bin/cloakserve
 +++ b/bin/cloakserve
 @@ -41,6 +41,7 @@ from aiohttp import web
@@ -63,7 +63,7 @@ index 0eb17f5..3f57885 100755
          if self._default is proc:
              self._default = None
          self._locks.pop(key, None)
-@@ -821,6 +827,22 @@ def _default_idle_timeout(env: str = "CLOAKSERVE_IDLE_TIMEOUT", flag: str = "--i
+@@ -824,6 +830,22 @@ def _default_idle_timeout(env: str = "CLOAKSERVE_IDLE_TIMEOUT", flag: str = "--i
      return _parse_idle_timeout(value, flag)
  
  
@@ -86,7 +86,7 @@ index 0eb17f5..3f57885 100755
  async def _exit_after_idle(pool: ChromePool, timeout: float) -> None:
      """Stop the server once no CDP connection has been open for `timeout` seconds."""
      while True:
-@@ -849,6 +871,7 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
+@@ -852,6 +874,7 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
          "default_timezone": None,
          "idle_timeout": _default_idle_timeout(),
          "keep_profiles": False,
@@ -94,7 +94,7 @@ index 0eb17f5..3f57885 100755
          "exit_after_idle": _default_idle_timeout("CLOAKSERVE_EXIT_AFTER_IDLE", "--exit-after-idle"),
      }
      passthrough = []
-@@ -857,6 +880,7 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
+@@ -860,6 +883,7 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
          "--port=",
          "--data-dir=",
          "--idle-timeout=",
@@ -102,7 +102,7 @@ index 0eb17f5..3f57885 100755
          "--exit-after-idle=",
          "--remote-debugging-port=",
          "--remote-debugging-address=",
-@@ -871,11 +895,14 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
+@@ -874,11 +898,14 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, list[str]]:
              config["idle_timeout"] = _parse_idle_timeout(arg.split("=", 1)[1])
          elif arg == "--keep-profiles":
              config["keep_profiles"] = True
@@ -118,7 +118,7 @@ index 0eb17f5..3f57885 100755
          elif arg.startswith(consumed_prefixes):
              pass  # Strip these silently
          # Route through build_args() so companion flags are set correctly
-@@ -919,6 +946,7 @@ def main() -> None:
+@@ -922,6 +949,7 @@ def main() -> None:
          default_timezone=config["default_timezone"],
          idle_timeout=config["idle_timeout"],
          keep_profiles=config["keep_profiles"],
@@ -167,7 +167,7 @@ index 9295cc2..5236e3d 100644
  # Wait for the X server to actually accept connections before starting the WM.
  # A blind `sleep 1` races under a CPU-starved start: openbox can come up before
 diff --git a/tests/test_cloakserve.py b/tests/test_cloakserve.py
-index 62c5119..77af9b2 100644
+index 46303e0..3b7638e 100644
 --- a/tests/test_cloakserve.py
 +++ b/tests/test_cloakserve.py
 @@ -94,6 +94,7 @@ class TestParseCliArgs:
@@ -210,7 +210,7 @@ index 62c5119..77af9b2 100644
      def test_exit_after_idle(self, monkeypatch):
          monkeypatch.delenv("CLOAKSERVE_EXIT_AFTER_IDLE", raising=False)
          assert parse_cli_args([])[0]["exit_after_idle"] == 0.0
-@@ -779,6 +794,32 @@ class TestSafeRmtree:
+@@ -818,6 +833,32 @@ class TestSafeRmtree:
  
          assert victim.exists(), "Traversal path must not be deleted"
  

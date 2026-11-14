@@ -1,5 +1,5 @@
 diff --git a/bin/cloakserve b/bin/cloakserve
-index 3f57885..22e229e 100755
+index 7eaaaa4..6e4f04e 100755
 --- a/bin/cloakserve
 +++ b/bin/cloakserve
 @@ -399,16 +399,20 @@ class ChromePool:
@@ -100,24 +100,21 @@ index 3f57885..22e229e 100755
  
  
  async def handle_ws_default(request: web.Request) -> web.StreamResponse:
-@@ -759,20 +782,17 @@ async def handle_ws_default(request: web.Request) -> web.StreamResponse:
- 
-     cp = await pool.get_or_launch(seed=None)
+@@ -762,20 +785,16 @@ async def handle_ws_default(request: web.Request) -> web.StreamResponse:
+     # that is the seed, and counting elsewhere lets idle cleanup kill live clients.
+     key = pool._default_seed or "__default__"
  
 -    ws = web.WebSocketResponse(heartbeat=WS_HEARTBEAT_SECONDS)
 -    await ws.prepare(request)
 -
--    pool.connect("__default__")
-+    seed_key = pool._default_seed or "__default__"
-+    pool.connect(seed_key)
+     pool.connect(key)
      try:
          target_url = f"ws://127.0.0.1:{cp.cdp_port}/devtools/{path}"
 -        await proxy_cdp_websocket(ws, target_url, f"CDP default [{path}]")
 +        return await proxy_cdp_websocket(request, target_url, f"CDP default [{path}]")
      finally:
--        pool.disconnect("__default__")
+         pool.disconnect(key)
 -    return ws
-+        pool.disconnect(seed_key)
  
  
  async def handle_ws_seed(request: web.Request) -> web.StreamResponse:
@@ -126,7 +123,7 @@ index 3f57885..22e229e 100755
      rejected = _reject_untrusted_origin(request)
      if rejected is not None:
          return rejected
-@@ -783,16 +803,12 @@ async def handle_ws_seed(request: web.Request) -> web.StreamResponse:
+@@ -786,16 +805,12 @@ async def handle_ws_seed(request: web.Request) -> web.StreamResponse:
  
      cp = await pool.get_or_launch(seed=seed)
  
@@ -145,19 +142,24 @@ index 3f57885..22e229e 100755
  
  async def on_shutdown(app: web.Application) -> None:
 diff --git a/tests/test_cloakserve.py b/tests/test_cloakserve.py
-index 77af9b2..2aea887 100644
+index 3b7638e..31e5599 100644
 --- a/tests/test_cloakserve.py
 +++ b/tests/test_cloakserve.py
-@@ -835,6 +835,8 @@ class TestClientHeartbeat:
-         events = []
+@@ -693,9 +693,12 @@ class TestConnectionTracking:
+         from aiohttp import web
+         from aiohttp.test_utils import TestClient, TestServer
  
-         class Pool:
-+            _default_seed = None
-+
-             async def get_or_launch(self, seed=None):
-                 return SimpleNamespace(cdp_port=1)
+-        async def fake_proxy(client_ws, target_url, label):
++        async def fake_proxy(request, target_url, label):
++            client_ws = web.WebSocketResponse(heartbeat=_mod.WS_HEARTBEAT_SECONDS)
++            await client_ws.prepare(request)
+             async for _ in client_ws:
+                 pass
++            return client_ws
  
-@@ -844,9 +846,12 @@ class TestClientHeartbeat:
+         async def run():
+             pool = ChromePool(
+@@ -885,9 +888,12 @@ class TestClientHeartbeat:
              def disconnect(self, key):
                  events.append("disconnect")
  
